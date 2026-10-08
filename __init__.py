@@ -44,7 +44,10 @@ def _eligible(path: str) -> bool:
 
 def _post_tool_call(tool_name: str, args: dict, result, session_id: str = "", **kwargs):
     try:
-        if kwargs.get("platform") != "desktop" or tool_name not in {"write_file", "patch"}:
+        # post_tool_call dispatch (model_tools.py) carries no platform kwarg; gating it here
+        # would disable tracking even on desktop. The leak gate is in _transform_llm_output,
+        # which does receive platform (turn_finalizer.py). State is bounded + cleared on session end.
+        if tool_name not in {"write_file", "patch"}:
             return
         path = (args or {}).get("path") or ""
         if path and _eligible(path):
