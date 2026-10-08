@@ -44,18 +44,18 @@ def _eligible(path: str) -> bool:
 
 def _post_tool_call(tool_name: str, args: dict, result, session_id: str = "", **kwargs):
     try:
-        if tool_name not in {"write_file", "patch"}:
+        if kwargs.get("platform") != "desktop" or tool_name not in {"write_file", "patch"}:
             return
         path = (args or {}).get("path") or ""
         if path and _eligible(path):
-            _written[session_id or "_"] = path
+            _written[session_id or "_"] = str(Path(path).expanduser().resolve())
     except Exception:
         pass  # observers must never break a turn
 
 
 def _transform_llm_output(response_text: str, session_id: str = "", **kwargs):
     try:
-        if not response_text or _DIRECTIVE_RE.search(response_text):
+        if kwargs.get("platform") != "desktop" or not response_text or _DIRECTIVE_RE.search(response_text):
             return None
         path = _written.pop(session_id or "_", None)
         if not path:

@@ -209,7 +209,7 @@ function RedlinePane({ ctx, file }) {
     const ok = host.composer.submit(host.state.focusedSessionId.get(), buildBatchMessage(active, open))
     if (!ok) { host.notifyError('redline: no open chat can receive the batch'); return }
     save(items.map((a) => (a.status === 'open' ? { ...a, status: 'sent' } : a)))
-    host.notify({ kind: 'info', message: `redline: ${open.length} annotations in the composer — press Enter` })
+    host.notify({ kind: 'info', message: `redline: ${open.length} annotations sent to Hermes` })
   }
   const sendOne = (id, note) => {
     const a = items.find((x) => x.id === id)
@@ -219,7 +219,7 @@ function RedlinePane({ ctx, file }) {
     save(items.map((x) => (x.id === id ? { ...x, note: note.trim(), draft: undefined, status: 'sent' } : x)))
     setShown(null)
     setDraftText('')
-    host.notify({ kind: 'info', message: 'redline: annotation in the composer — press Enter' })
+    host.notify({ kind: 'info', message: 'redline: annotation sent to Hermes' })
   }
 
   const load = () => {
