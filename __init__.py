@@ -63,7 +63,10 @@ def _transform_llm_output(response_text: str, session_id: str = "", **kwargs):
         path = _written.pop(session_id or "_", None)
         if not path:
             return None
-        return response_text + f"\n\n::redline{{file={json.dumps(path)}}}"
+        # ensure_ascii=False: the desktop directive parser reads attribute values
+        # verbatim (no JSON unescape), so \uXXXX escapes would reach the redline
+        # backend as literal text and 404 on any non-ASCII path.
+        return response_text + f"\n\n::redline{{file={json.dumps(path, ensure_ascii=False)}}}"
     except Exception:
         return None  # fail-soft: never touch the response on error
 
