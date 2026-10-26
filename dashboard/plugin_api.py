@@ -25,6 +25,23 @@ except ImportError:
 router = APIRouter()
 
 MAX_BYTES = 1_000_000
+# Comma- or OS-pathsep-separated extra workspace roots (expanded, resolved).
+_WORKSPACE_ROOTS_ENV = "REDLINE_WORKSPACE_ROOTS"
+_ALLOW_HERMES_HOME_ENV = "REDLINE_ALLOW_HERMES_HOME"
+_ALLOW_SENSITIVE_ENV = "REDLINE_ALLOW_SENSITIVE_PATHS"
+_SENSITIVE_NAMES = frozenset(
+    {
+        ".env",
+        "auth.json",
+        "credentials.json",
+        "secrets.json",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    }
+)
+_SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 MAX_TOKENS = 200_000
 _MD_EXT = {".md", ".markdown"}
 _CODE_EXT = (".py", ".sh", ".js", ".ts", ".tsx", ".c", ".h", ".cpp", ".go", ".rs", ".rb",
@@ -71,6 +88,66 @@ def _tokens(p: Path, content: str) -> list:
     return out
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser().resolve()
+
+
+def _workspace_roots() -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for raw in (os.getcwd(), *os.environ.get(_WORKSPACE_ROOTS_ENV, "").replace(",", os.pathsep).split(os.pathsep)):
+        part = str(raw).strip()
+        if not part:
+            continue
+        try:
+            root = Path(part).expanduser().resolve()
+        except OSError:
+            continue
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return roots
+
+
+def _under_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _in_workspace(path: Path) -> bool:
+    return any(_under_root(path, root) for root in _workspace_roots())
+
+
+def _under_hermes_home(path: Path) -> bool:
+    return _under_root(path, _hermes_home())
+
+
+def _is_sensitive_path(path: Path) -> bool:
+    name = path.name.lower()
+    if name in _SENSITIVE_NAMES or name.startswith(".env."):
+        return True
+    if name.startswith("id_rsa") or name.startswith("id_dsa"):
+        return True
+    return name.endswith(_SENSITIVE_SUFFIXES)
+
+
+def _assert_workspace_access(path: Path) -> None:
+    if not _in_workspace(path):
+        raise HTTPException(403, "path is outside redline workspace roots")
+    if _under_hermes_home(path) and not _truthy_env(_ALLOW_HERMES_HOME_ENV):
+        raise HTTPException(403, "paths under HERMES_HOME are blocked by redline policy")
+    if _is_sensitive_path(path) and not _truthy_env(_ALLOW_SENSITIVE_ENV):
+        raise HTTPException(403, "sensitive path blocked by redline policy")
+
+
 def _resolve(path: str) -> Path:
     # resolve() first: a symlink named .md must not smuggle a non-markdown target
     try:
@@ -83,6 +160,7 @@ def _resolve(path: str) -> Path:
         raise HTTPException(404, f"not a file: {p}")
     if p.stat().st_size > MAX_BYTES:
         raise HTTPException(413, "file too large for redline")
+    _assert_workspace_access(p)
     return p
 
 
