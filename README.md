@@ -61,9 +61,18 @@ Three pieces, no core patches — everything through the Desktop plugin SDK:
 
 Agent-side hooks remember eligible Markdown/source files written via `write_file` or `patch` and append the card directive automatically at the end of the response. The agent side is otherwise just a message format: a batch arrives as `⁂ redline — review of <path> (N notes):` with numbered `selection:` entries; code selections include `L<n>:` line anchors, which any Hermes agent can act on.
 
+## Workspace roots (gateway host)
+
+The backend only reads or writes files under **workspace roots** on the gateway machine:
+
+- The gateway process working directory (`cwd` when the Hermes gateway starts), plus
+- Extra directories from the `REDLINE_WORKSPACE_ROOTS` environment variable (comma- or `PATH`-separated list of absolute paths).
+
+Paths under `HERMES_HOME` (from `HERMES_HOME` or `~/.hermes`) and well-known sensitive filenames (for example `auth.json`, `.env`, private keys) are blocked unless you explicitly opt in with `REDLINE_ALLOW_HERMES_HOME=1` or `REDLINE_ALLOW_SENSITIVE_PATHS=1`. Point `REDLINE_WORKSPACE_ROOTS` at your project checkout when the gateway `cwd` is not the agent workspace (common with remote gateways).
+
 ## Disclosure
 
-- Reads any local `.md`/`.markdown` or supported source-file path you name (max 1 MB) and writes only the sidecar beside it. Reviewed paths and sidecars live on the gateway host, not the Desktop client machine (relevant when using a remote gateway). It is a local review tool, not a sandboxed document service.
+- Reads local `.md`/`.markdown` or supported source files under configured workspace roots (max 1 MB per file) and writes only the sidecar beside them. Reviewed paths and sidecars live on the gateway host, not the Desktop client machine (relevant when using a remote gateway). It is a local review tool, not a sandboxed document service.
 - No network calls beyond the local Hermes gateway. No credentials touched. No telemetry.
 - The pane polls the backend every 3 s while open so agent edits show up live.
 - The `transform_llm_output` hook modifies the final agent response by appending a `::redline{file="..."}` directive after an eligible Markdown or source file is delivered. Hermes renders that trailing directive as the review card, using the same directive mechanism as core previews.

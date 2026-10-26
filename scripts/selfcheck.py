@@ -3,11 +3,46 @@
 import ast
 import importlib.util
 import json
+import os
 import re
 import subprocess
+import sys
+import tempfile
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_plugin_api():
+    if "fastapi" not in sys.modules:
+        fastapi = types.ModuleType("fastapi")
+
+        class HTTPException(Exception):
+            def __init__(self, status_code, detail=""):
+                self.status_code = status_code
+                self.detail = detail
+
+        class APIRouter:
+            def get(self, *_args, **_kwargs):
+                def decorator(fn):
+                    return fn
+
+                return decorator
+
+            def post(self, *_args, **_kwargs):
+                return self.get
+
+        fastapi.HTTPException = HTTPException
+        fastapi.APIRouter = APIRouter
+        fastapi.Query = lambda *_args, **_kwargs: None
+        sys.modules["fastapi"] = fastapi
+
+    spec = importlib.util.spec_from_file_location("redline_api", ROOT / "dashboard/plugin_api.py")
+    assert spec is not None and spec.loader is not None
+    api = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    return api
 
 
 def python_extensions(path: Path) -> tuple[str, ...]:
@@ -33,6 +68,79 @@ def main() -> None:
     spec.loader.exec_module(module)
     assert module._skip_path(r"C:\\Users\\x\\.hermes\\cache\\y.py")
     assert not module._skip_path("/home/x/note.py")
+
+    api = _load_plugin_api()
+
+    with tempfile.TemporaryDirectory() as workspace:
+        ws = Path(workspace).resolve()
+        doc = ws / "report.md"
+        doc.write_text("# hello\n", encoding="utf-8")
+        secret = ws / "auth.json"
+        secret.write_text("{}", encoding="utf-8")
+
+        old_cwd = os.getcwd()
+        old_roots = os.environ.get("REDLINE_WORKSPACE_ROOTS")
+        old_allow_sensitive = os.environ.get("REDLINE_ALLOW_SENSITIVE_PATHS")
+        old_allow_hermes = os.environ.get("REDLINE_ALLOW_HERMES_HOME")
+        old_hermes_home = os.environ.get("HERMES_HOME")
+        try:
+            os.chdir(ws)
+            os.environ.pop("REDLINE_WORKSPACE_ROOTS", None)
+            os.environ.pop("REDLINE_ALLOW_SENSITIVE_PATHS", None)
+            os.environ.pop("REDLINE_ALLOW_HERMES_HOME", None)
+
+            assert api._resolve(str(doc)) == doc
+            try:
+                api._resolve(str(secret))
+            except api.HTTPException as exc:
+                assert exc.status_code == 403
+            else:
+                raise AssertionError("expected sensitive path to be blocked")
+
+            outside = Path(tempfile.gettempdir()).resolve() / "redline-outside-test.md"
+            outside.write_text("# x\n", encoding="utf-8")
+            try:
+                api._resolve(str(outside))
+            except api.HTTPException as exc:
+                assert exc.status_code == 403
+            else:
+                raise AssertionError("expected path outside workspace to be blocked")
+            finally:
+                outside.unlink(missing_ok=True)
+
+            with tempfile.TemporaryDirectory() as hermes_dir:
+                hh = Path(hermes_dir).resolve()
+                os.environ["HERMES_HOME"] = str(hh)
+                cfg = hh / "config.yaml"
+                cfg.write_text("x: 1\n", encoding="utf-8")
+                os.environ["REDLINE_WORKSPACE_ROOTS"] = str(hh)
+                try:
+                    api._resolve(str(cfg))
+                except api.HTTPException as exc:
+                    assert exc.status_code == 403
+                else:
+                    raise AssertionError("expected HERMES_HOME path to be blocked")
+                os.environ["REDLINE_ALLOW_HERMES_HOME"] = "1"
+                assert api._resolve(str(cfg)) == cfg
+        finally:
+            os.chdir(old_cwd)
+            if old_roots is None:
+                os.environ.pop("REDLINE_WORKSPACE_ROOTS", None)
+            else:
+                os.environ["REDLINE_WORKSPACE_ROOTS"] = old_roots
+            if old_allow_sensitive is None:
+                os.environ.pop("REDLINE_ALLOW_SENSITIVE_PATHS", None)
+            else:
+                os.environ["REDLINE_ALLOW_SENSITIVE_PATHS"] = old_allow_sensitive
+            if old_allow_hermes is None:
+                os.environ.pop("REDLINE_ALLOW_HERMES_HOME", None)
+            else:
+                os.environ["REDLINE_ALLOW_HERMES_HOME"] = old_allow_hermes
+            if old_hermes_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = old_hermes_home
+
     print("redline selfcheck: ok")
 
 
