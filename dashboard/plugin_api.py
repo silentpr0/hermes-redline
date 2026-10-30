@@ -4,12 +4,24 @@ Mounted at /api/plugins/redline/ when the dashboard plugin is discovered.
 Code files are lexed with Pygments (already in the gateway venv) into a flat
 token list the desktop pane renders; any lexer failure degrades to plain text.
 """
+import importlib.util
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+
+_POLICY_MODULE = "redline_workspace_policy"
+_wp_path = Path(__file__).resolve().with_name("workspace_policy.py")
+wp = sys.modules.get(_POLICY_MODULE)
+if wp is None:
+    _wp_spec = importlib.util.spec_from_file_location(_POLICY_MODULE, _wp_path)
+    assert _wp_spec is not None and _wp_spec.loader is not None
+    wp = importlib.util.module_from_spec(_wp_spec)
+    sys.modules[_POLICY_MODULE] = wp
+    _wp_spec.loader.exec_module(wp)
 
 try:  # Pygments ships in the gateway venv transitively (via rich/pytest); a
 # minimal install may lack it — then code renders as plain text, never 500.
@@ -26,7 +38,8 @@ router = APIRouter()
 
 MAX_BYTES = 1_000_000
 # Comma- or OS-pathsep-separated extra workspace roots (expanded, resolved).
-_WORKSPACE_ROOTS_ENV = "REDLINE_WORKSPACE_ROOTS"
+_WORKSPACE_ROOTS_ENV = wp._WORKSPACE_ROOTS_ENV
+_INCLUDE_GATEWAY_CWD_ENV = wp._INCLUDE_GATEWAY_CWD_ENV
 _ALLOW_HERMES_HOME_ENV = "REDLINE_ALLOW_HERMES_HOME"
 _ALLOW_SENSITIVE_ENV = "REDLINE_ALLOW_SENSITIVE_PATHS"
 _SENSITIVE_NAMES = frozenset(
@@ -97,33 +110,15 @@ def _hermes_home() -> Path:
 
 
 def _workspace_roots() -> list[Path]:
-    roots: list[Path] = []
-    seen: set[str] = set()
-    for raw in (os.getcwd(), *os.environ.get(_WORKSPACE_ROOTS_ENV, "").replace(",", os.pathsep).split(os.pathsep)):
-        part = str(raw).strip()
-        if not part:
-            continue
-        try:
-            root = Path(part).expanduser().resolve()
-        except OSError:
-            continue
-        key = str(root)
-        if key not in seen:
-            seen.add(key)
-            roots.append(root)
-    return roots
+    return wp.all_workspace_roots()
 
 
 def _under_root(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+    return wp.under_root(path, root)
 
 
 def _in_workspace(path: Path) -> bool:
-    return any(_under_root(path, root) for root in _workspace_roots())
+    return wp.in_workspace(path)
 
 
 def _under_hermes_home(path: Path) -> bool:

@@ -63,12 +63,16 @@ Agent-side hooks remember eligible Markdown/source files written via `write_file
 
 ## Workspace roots (gateway host)
 
-The backend only reads or writes files under **workspace roots** on the gateway machine:
+The backend only reads or writes files under **workspace roots** on the gateway machine. Roots are combined from:
 
-- The gateway process working directory (`cwd` when the Hermes gateway starts), plus
-- Extra directories from the `REDLINE_WORKSPACE_ROOTS` environment variable (comma- or `PATH`-separated list of absolute paths).
+1. **`REDLINE_WORKSPACE_ROOTS`** — comma- or `PATH`-separated absolute directories you configure explicitly.
+2. **Hermes workspace env** (when set by the gateway): `HERMES_WORKSPACE`, `HERMES_AGENT_CWD`, `HERMES_PROJECT_ROOT`, or `WORKSPACE`.
+3. **Agent-written files** — when the agent uses `write_file` or `patch` on a reviewable file, that file’s parent directory is remembered for the lifetime of the gateway process (covers the usual `Desktop/project/doc.md` case even when the gateway `cwd` is elsewhere).
+4. **Gateway `cwd`** — included only when no explicit/Hermes roots are configured, or when `REDLINE_INCLUDE_GATEWAY_CWD=1`.
 
-Paths under `HERMES_HOME` (from `HERMES_HOME` or `~/.hermes`) and well-known sensitive filenames (for example `auth.json`, `.env`, private keys) are blocked unless you explicitly opt in with `REDLINE_ALLOW_HERMES_HOME=1` or `REDLINE_ALLOW_SENSITIVE_PATHS=1`. Point `REDLINE_WORKSPACE_ROOTS` at your project checkout when the gateway `cwd` is not the agent workspace (common with remote gateways).
+If none of the above apply to a path, set `REDLINE_WORKSPACE_ROOTS` (for example to your project checkout on remote gateways).
+
+Paths under `HERMES_HOME` (from `HERMES_HOME` or `~/.hermes`) and well-known sensitive filenames (for example `auth.json`, `.env`, private keys) are blocked unless you explicitly opt in with `REDLINE_ALLOW_HERMES_HOME=1` or `REDLINE_ALLOW_SENSITIVE_PATHS=1`.
 
 ## Disclosure
 

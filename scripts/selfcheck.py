@@ -45,6 +45,33 @@ def _load_plugin_api():
     return api
 
 
+def _load_workspace_policy():
+    name = "redline_workspace_policy"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, ROOT / "dashboard/workspace_policy.py")
+    assert spec is not None and spec.loader is not None
+    wp = importlib.util.module_from_spec(spec)
+    sys.modules[name] = wp
+    spec.loader.exec_module(wp)
+    return wp
+
+
+def _temp_parent_outside_hermes(api) -> Path:
+    hh = api._hermes_home()
+    for candidate in (Path("/tmp"), Path("/var/tmp"), Path.home()):
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        try:
+            resolved.relative_to(hh)
+        except ValueError:
+            return resolved
+    raise AssertionError("could not find temp parent outside HERMES_HOME")
+
+
 def python_extensions(path: Path) -> tuple[str, ...]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in tree.body:
@@ -70,26 +97,51 @@ def main() -> None:
     assert not module._skip_path("/home/x/note.py")
 
     api = _load_plugin_api()
+    wp = api.wp
+    wp.clear_agent_roots()
 
-    with tempfile.TemporaryDirectory() as workspace:
-        ws = Path(workspace).resolve()
-        doc = ws / "report.md"
-        doc.write_text("# hello\n", encoding="utf-8")
-        secret = ws / "auth.json"
-        secret.write_text("{}", encoding="utf-8")
+    temp_parent = _temp_parent_outside_hermes(api)
+    old_cwd = os.getcwd()
+    old_tmpdir = os.environ.get("TMPDIR")
+    old_roots = os.environ.get("REDLINE_WORKSPACE_ROOTS")
+    old_include_cwd = os.environ.get("REDLINE_INCLUDE_GATEWAY_CWD")
+    old_allow_sensitive = os.environ.get("REDLINE_ALLOW_SENSITIVE_PATHS")
+    old_allow_hermes = os.environ.get("REDLINE_ALLOW_HERMES_HOME")
+    old_hermes_home = os.environ.get("HERMES_HOME")
+    old_agent_envs = {name: os.environ.get(name) for name in wp._HERMES_WORKSPACE_ENVS}
 
-        old_cwd = os.getcwd()
-        old_roots = os.environ.get("REDLINE_WORKSPACE_ROOTS")
-        old_allow_sensitive = os.environ.get("REDLINE_ALLOW_SENSITIVE_PATHS")
-        old_allow_hermes = os.environ.get("REDLINE_ALLOW_HERMES_HOME")
-        old_hermes_home = os.environ.get("HERMES_HOME")
-        try:
-            os.chdir(ws)
+    try:
+        os.environ["TMPDIR"] = str(temp_parent)
+        with tempfile.TemporaryDirectory(dir=temp_parent) as workspace:
+            ws = Path(workspace).resolve()
+            project = ws / "Desktop" / "project"
+            project.mkdir(parents=True)
+            doc = project / "report.md"
+            doc.write_text("# hello\n", encoding="utf-8")
+            secret = project / "auth.json"
+            secret.write_text("{}", encoding="utf-8")
+
+            gateway_cwd = ws / "gateway"
+            gateway_cwd.mkdir()
+            os.chdir(gateway_cwd)
             os.environ.pop("REDLINE_WORKSPACE_ROOTS", None)
+            os.environ.pop("REDLINE_INCLUDE_GATEWAY_CWD", None)
             os.environ.pop("REDLINE_ALLOW_SENSITIVE_PATHS", None)
             os.environ.pop("REDLINE_ALLOW_HERMES_HOME", None)
+            for name in wp._HERMES_WORKSPACE_ENVS:
+                os.environ.pop(name, None)
+            wp.clear_agent_roots()
 
+            try:
+                api._resolve(str(doc))
+            except api.HTTPException as exc:
+                assert exc.status_code == 403
+            else:
+                raise AssertionError("expected doc outside gateway cwd to be blocked before registration")
+
+            wp.register_agent_path(str(doc))
             assert api._resolve(str(doc)) == doc
+
             try:
                 api._resolve(str(secret))
             except api.HTTPException as exc:
@@ -97,7 +149,7 @@ def main() -> None:
             else:
                 raise AssertionError("expected sensitive path to be blocked")
 
-            outside = Path(tempfile.gettempdir()).resolve() / "redline-outside-test.md"
+            outside = temp_parent / "redline-outside-target.md"
             outside.write_text("# x\n", encoding="utf-8")
             try:
                 api._resolve(str(outside))
@@ -105,15 +157,30 @@ def main() -> None:
                 assert exc.status_code == 403
             else:
                 raise AssertionError("expected path outside workspace to be blocked")
+
+            link = project / "escape.md"
+            link.symlink_to(outside)
+            try:
+                api._resolve(str(link))
+            except api.HTTPException as exc:
+                assert exc.status_code == 403
+            else:
+                raise AssertionError("expected symlink escape outside roots to be blocked")
             finally:
+                link.unlink(missing_ok=True)
                 outside.unlink(missing_ok=True)
 
-            with tempfile.TemporaryDirectory() as hermes_dir:
+            os.environ["HERMES_WORKSPACE"] = str(project)
+            wp.clear_agent_roots()
+            assert api._resolve(str(doc)) == doc
+
+            with tempfile.TemporaryDirectory(dir=temp_parent) as hermes_dir:
                 hh = Path(hermes_dir).resolve()
                 os.environ["HERMES_HOME"] = str(hh)
                 cfg = hh / "config.yaml"
                 cfg.write_text("x: 1\n", encoding="utf-8")
                 os.environ["REDLINE_WORKSPACE_ROOTS"] = str(hh)
+                wp.clear_agent_roots()
                 try:
                     api._resolve(str(cfg))
                 except api.HTTPException as exc:
@@ -122,24 +189,38 @@ def main() -> None:
                     raise AssertionError("expected HERMES_HOME path to be blocked")
                 os.environ["REDLINE_ALLOW_HERMES_HOME"] = "1"
                 assert api._resolve(str(cfg)) == cfg
-        finally:
-            os.chdir(old_cwd)
-            if old_roots is None:
-                os.environ.pop("REDLINE_WORKSPACE_ROOTS", None)
+    finally:
+        wp.clear_agent_roots()
+        os.chdir(old_cwd)
+        if old_tmpdir is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = old_tmpdir
+        if old_roots is None:
+            os.environ.pop("REDLINE_WORKSPACE_ROOTS", None)
+        else:
+            os.environ["REDLINE_WORKSPACE_ROOTS"] = old_roots
+        if old_include_cwd is None:
+            os.environ.pop("REDLINE_INCLUDE_GATEWAY_CWD", None)
+        else:
+            os.environ["REDLINE_INCLUDE_GATEWAY_CWD"] = old_include_cwd
+        if old_allow_sensitive is None:
+            os.environ.pop("REDLINE_ALLOW_SENSITIVE_PATHS", None)
+        else:
+            os.environ["REDLINE_ALLOW_SENSITIVE_PATHS"] = old_allow_sensitive
+        if old_allow_hermes is None:
+            os.environ.pop("REDLINE_ALLOW_HERMES_HOME", None)
+        else:
+            os.environ["REDLINE_ALLOW_HERMES_HOME"] = old_allow_hermes
+        if old_hermes_home is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = old_hermes_home
+        for name, value in old_agent_envs.items():
+            if value is None:
+                os.environ.pop(name, None)
             else:
-                os.environ["REDLINE_WORKSPACE_ROOTS"] = old_roots
-            if old_allow_sensitive is None:
-                os.environ.pop("REDLINE_ALLOW_SENSITIVE_PATHS", None)
-            else:
-                os.environ["REDLINE_ALLOW_SENSITIVE_PATHS"] = old_allow_sensitive
-            if old_allow_hermes is None:
-                os.environ.pop("REDLINE_ALLOW_HERMES_HOME", None)
-            else:
-                os.environ["REDLINE_ALLOW_HERMES_HOME"] = old_allow_hermes
-            if old_hermes_home is None:
-                os.environ.pop("HERMES_HOME", None)
-            else:
-                os.environ["HERMES_HOME"] = old_hermes_home
+                os.environ[name] = value
 
     print("redline selfcheck: ok")
 
