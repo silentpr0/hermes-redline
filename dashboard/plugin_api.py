@@ -4,12 +4,24 @@ Mounted at /api/plugins/redline/ when the dashboard plugin is discovered.
 Code files are lexed with Pygments (already in the gateway venv) into a flat
 token list the desktop pane renders; any lexer failure degrades to plain text.
 """
+import importlib.util
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+
+_POLICY_MODULE = "redline_workspace_policy"
+_wp_path = Path(__file__).resolve().with_name("workspace_policy.py")
+wp = sys.modules.get(_POLICY_MODULE)
+if wp is None:
+    _wp_spec = importlib.util.spec_from_file_location(_POLICY_MODULE, _wp_path)
+    assert _wp_spec is not None and _wp_spec.loader is not None
+    wp = importlib.util.module_from_spec(_wp_spec)
+    sys.modules[_POLICY_MODULE] = wp
+    _wp_spec.loader.exec_module(wp)
 
 try:  # Pygments ships in the gateway venv transitively (via rich/pytest); a
 # minimal install may lack it — then code renders as plain text, never 500.
@@ -25,6 +37,24 @@ except ImportError:
 router = APIRouter()
 
 MAX_BYTES = 1_000_000
+# Comma- or OS-pathsep-separated extra workspace roots (expanded, resolved).
+_WORKSPACE_ROOTS_ENV = wp._WORKSPACE_ROOTS_ENV
+_INCLUDE_GATEWAY_CWD_ENV = wp._INCLUDE_GATEWAY_CWD_ENV
+_ALLOW_HERMES_HOME_ENV = "REDLINE_ALLOW_HERMES_HOME"
+_ALLOW_SENSITIVE_ENV = "REDLINE_ALLOW_SENSITIVE_PATHS"
+_SENSITIVE_NAMES = frozenset(
+    {
+        ".env",
+        "auth.json",
+        "credentials.json",
+        "secrets.json",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    }
+)
+_SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 MAX_TOKENS = 200_000
 _MD_EXT = {".md", ".markdown"}
 _CODE_EXT = (".py", ".sh", ".js", ".ts", ".tsx", ".c", ".h", ".cpp", ".go", ".rs", ".rb",
@@ -71,6 +101,48 @@ def _tokens(p: Path, content: str) -> list:
     return out
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser().resolve()
+
+
+def _workspace_roots() -> list[Path]:
+    return wp.all_workspace_roots()
+
+
+def _under_root(path: Path, root: Path) -> bool:
+    return wp.under_root(path, root)
+
+
+def _in_workspace(path: Path) -> bool:
+    return wp.in_workspace(path)
+
+
+def _under_hermes_home(path: Path) -> bool:
+    return _under_root(path, _hermes_home())
+
+
+def _is_sensitive_path(path: Path) -> bool:
+    name = path.name.lower()
+    if name in _SENSITIVE_NAMES or name.startswith(".env."):
+        return True
+    if name.startswith("id_rsa") or name.startswith("id_dsa"):
+        return True
+    return name.endswith(_SENSITIVE_SUFFIXES)
+
+
+def _assert_workspace_access(path: Path) -> None:
+    if not _in_workspace(path):
+        raise HTTPException(403, "path is outside redline workspace roots")
+    if _under_hermes_home(path) and not _truthy_env(_ALLOW_HERMES_HOME_ENV):
+        raise HTTPException(403, "paths under HERMES_HOME are blocked by redline policy")
+    if _is_sensitive_path(path) and not _truthy_env(_ALLOW_SENSITIVE_ENV):
+        raise HTTPException(403, "sensitive path blocked by redline policy")
+
+
 def _resolve(path: str) -> Path:
     # resolve() first: a symlink named .md must not smuggle a non-markdown target
     try:
@@ -83,6 +155,7 @@ def _resolve(path: str) -> Path:
         raise HTTPException(404, f"not a file: {p}")
     if p.stat().st_size > MAX_BYTES:
         raise HTTPException(413, "file too large for redline")
+    _assert_workspace_access(p)
     return p
 
 

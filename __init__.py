@@ -9,8 +9,10 @@ must never affect the response.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import sys
 from pathlib import Path, PurePosixPath
 
 _DIRECTIVE_RE = re.compile(r"::redline\{")
@@ -21,6 +23,23 @@ _CODE_EXT = (".py", ".sh", ".js", ".ts", ".tsx", ".c", ".h", ".cpp", ".go", ".rs
 _MIN_BYTES = 200
 
 _written: dict[str, str] = {}
+
+
+def _register_review_root(path: str) -> None:
+    try:
+        policy_path = Path(__file__).resolve().parent / "dashboard" / "workspace_policy.py"
+        name = "redline_workspace_policy"
+        mod = sys.modules.get(name)
+        if mod is None:
+            spec = importlib.util.spec_from_file_location(name, policy_path)
+            if spec is None or spec.loader is None:
+                return
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod
+            spec.loader.exec_module(mod)
+        mod.register_agent_path(path)
+    except Exception:
+        pass
 
 
 def _skip_path(path: str | Path) -> bool:
@@ -62,7 +81,9 @@ def _post_tool_call(tool_name: str, args: dict, result, session_id: str = "", **
             return
         path = (args or {}).get("path") or ""
         if path and _eligible(path):
-            _written[session_id or "_"] = str(Path(path).expanduser().resolve())
+            resolved = str(Path(path).expanduser().resolve())
+            _written[session_id or "_"] = resolved
+            _register_review_root(resolved)
     except Exception:
         pass  # observers must never break a turn
 
