@@ -67,10 +67,12 @@ The backend only reads or writes files under **workspace roots** on the gateway 
 
 1. **`REDLINE_WORKSPACE_ROOTS`** — comma- or `PATH`-separated absolute directories you configure explicitly.
 2. **Hermes workspace env** (when set by the gateway): `HERMES_WORKSPACE`, `HERMES_AGENT_CWD`, `HERMES_PROJECT_ROOT`, or `WORKSPACE`.
-3. **Agent-written files** — when the agent uses `write_file` or `patch` on a reviewable file, that file’s parent directory is remembered for the lifetime of the gateway process (covers the usual `Desktop/project/doc.md` case even when the gateway `cwd` is elsewhere).
+3. **Agent-written files** — when the agent uses `write_file` or `patch` on a reviewable file, **that exact file** (plus its `<file><ext>.redline.json` sidecar) is authorized for **the session that wrote it**, and the grant is dropped when that session ends. There are no directory grants: writing `Desktop/project/report.md` never authorizes `Desktop/project/unrelated.md`. Reopening an older document in a later session needs one of the roots above.
 4. **Gateway `cwd`** — included only when no explicit/Hermes roots are configured, or when `REDLINE_INCLUDE_GATEWAY_CWD=1`.
 
 If none of the above apply to a path, set `REDLINE_WORKSPACE_ROOTS` (for example to your project checkout on remote gateways).
+
+**`plugins.isolation: host`:** the hook that records agent-written files and the dashboard API then run in different processes, so an in-memory grant cannot cross that boundary. In that mode the backend relies on the configured/Hermes roots (items 1, 2 and 4); the agent-written-file path only works with `plugins.isolation: in_process` (the default).
 
 Paths under `HERMES_HOME` (from `HERMES_HOME` or `~/.hermes`) and well-known sensitive filenames (for example `auth.json`, `.env`, private keys) are blocked unless you explicitly opt in with `REDLINE_ALLOW_HERMES_HOME=1` or `REDLINE_ALLOW_SENSITIVE_PATHS=1`.
 

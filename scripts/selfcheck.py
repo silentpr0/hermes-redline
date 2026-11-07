@@ -98,7 +98,7 @@ def main() -> None:
 
     api = _load_plugin_api()
     wp = api.wp
-    wp.clear_agent_roots()
+    wp.clear_agent_paths()
 
     temp_parent = _temp_parent_outside_hermes(api)
     old_cwd = os.getcwd()
@@ -130,7 +130,7 @@ def main() -> None:
             os.environ.pop("REDLINE_ALLOW_HERMES_HOME", None)
             for name in wp._HERMES_WORKSPACE_ENVS:
                 os.environ.pop(name, None)
-            wp.clear_agent_roots()
+            wp.clear_agent_paths()
 
             try:
                 api._resolve(str(doc))
@@ -139,8 +139,51 @@ def main() -> None:
             else:
                 raise AssertionError("expected doc outside gateway cwd to be blocked before registration")
 
-            wp.register_agent_path(str(doc))
+            # (1) the exact file the agent wrote is allowed for the writing session
+            wp.register_agent_path(str(doc), "session-a")
             assert api._resolve(str(doc)) == doc
+            assert wp.is_granted(Path(str(doc) + wp.SIDECAR_SUFFIX))
+
+            # (2) a sibling in the same directory was never granted and stays denied
+            sibling = project / "unrelated.md"
+            sibling.write_text("# sibling\n", encoding="utf-8")
+            assert not wp.is_granted(Path(str(sibling) + wp.SIDECAR_SUFFIX))
+            try:
+                api._resolve(str(sibling))
+            except api.HTTPException as exc:
+                assert exc.status_code == 403
+            else:
+                raise AssertionError("expected an unregistered sibling to be blocked")
+
+            # (3) the grant dies with its session
+            wp.release_session("session-a")
+            assert not wp.is_granted(doc)
+            try:
+                api._resolve(str(doc))
+            except api.HTTPException as exc:
+                assert exc.status_code == 403
+            else:
+                raise AssertionError("expected access to be denied after the session ended")
+
+            # (4) plugins.isolation: host — the hook's registry is in another process,
+            # so grants do not cross; configured roots remain the way in.
+            iso_spec = importlib.util.spec_from_file_location(
+                "redline_workspace_policy_iso", ROOT / "dashboard/workspace_policy.py")
+            assert iso_spec is not None and iso_spec.loader is not None
+            isolated = importlib.util.module_from_spec(iso_spec)
+            iso_spec.loader.exec_module(isolated)
+            isolated.register_agent_path(str(doc), "session-host")
+            assert not wp.is_granted(doc)
+            try:
+                api._resolve(str(doc))
+            except api.HTTPException as exc:
+                assert exc.status_code == 403
+            else:
+                raise AssertionError("expected an isolated hook's grant not to reach the API")
+            os.environ["REDLINE_WORKSPACE_ROOTS"] = str(project)
+            assert api._resolve(str(doc)) == doc
+            os.environ.pop("REDLINE_WORKSPACE_ROOTS", None)
+            isolated.release_session("session-host")
 
             try:
                 api._resolve(str(secret))
@@ -171,7 +214,7 @@ def main() -> None:
                 outside.unlink(missing_ok=True)
 
             os.environ["HERMES_WORKSPACE"] = str(project)
-            wp.clear_agent_roots()
+            wp.clear_agent_paths()
             assert api._resolve(str(doc)) == doc
 
             with tempfile.TemporaryDirectory(dir=temp_parent) as hermes_dir:
@@ -180,7 +223,7 @@ def main() -> None:
                 cfg = hh / "config.yaml"
                 cfg.write_text("x: 1\n", encoding="utf-8")
                 os.environ["REDLINE_WORKSPACE_ROOTS"] = str(hh)
-                wp.clear_agent_roots()
+                wp.clear_agent_paths()
                 try:
                     api._resolve(str(cfg))
                 except api.HTTPException as exc:
@@ -190,7 +233,7 @@ def main() -> None:
                 os.environ["REDLINE_ALLOW_HERMES_HOME"] = "1"
                 assert api._resolve(str(cfg)) == cfg
     finally:
-        wp.clear_agent_roots()
+        wp.clear_agent_paths()
         os.chdir(old_cwd)
         if old_tmpdir is None:
             os.environ.pop("TMPDIR", None)

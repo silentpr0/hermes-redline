@@ -136,7 +136,11 @@ def _is_sensitive_path(path: Path) -> bool:
 
 def _assert_workspace_access(path: Path) -> None:
     if not _in_workspace(path):
-        raise HTTPException(403, "path is outside redline workspace roots")
+        raise HTTPException(
+            403,
+            "path is outside redline workspace roots (re-deliver the file in the current "
+            f"session, or set {_WORKSPACE_ROOTS_ENV})",
+        )
     if _under_hermes_home(path) and not _truthy_env(_ALLOW_HERMES_HOME_ENV):
         raise HTTPException(403, "paths under HERMES_HOME are blocked by redline policy")
     if _is_sensitive_path(path) and not _truthy_env(_ALLOW_SENSITIVE_ENV):
