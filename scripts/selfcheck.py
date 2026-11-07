@@ -192,6 +192,29 @@ def main() -> None:
             else:
                 raise AssertionError("expected sensitive path to be blocked")
 
+            # (5) end to end: the hook's grant is honoured by the API in-process,
+            # because both load the policy module under the same name.
+            with tempfile.TemporaryDirectory(dir=temp_parent) as wired_dir:
+                wired = Path(wired_dir).resolve() / "wired.md"
+                wired.write_text("# wired\n" + "text\n" * 60, encoding="utf-8")
+                module._on_session_end("session-wired")
+                wp.clear_agent_paths()
+                try:
+                    api._resolve(str(wired))
+                except api.HTTPException as exc:
+                    assert exc.status_code == 403
+                else:
+                    raise AssertionError("expected no access before the hook grants it")
+                module._post_tool_call("write_file", {"path": str(wired)}, None, session_id="session-wired")
+                assert api._resolve(str(wired)) == wired
+                module._on_session_end("session-wired")
+                try:
+                    api._resolve(str(wired))
+                except api.HTTPException as exc:
+                    assert exc.status_code == 403
+                else:
+                    raise AssertionError("expected on_session_end to drop the hook grant")
+
             outside = temp_parent / "redline-outside-target.md"
             outside.write_text("# x\n", encoding="utf-8")
             try:
