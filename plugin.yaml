@@ -1,5 +1,5 @@
 name: redline
-version: 0.3.0
+version: 0.3.1
 description: "Guided Markdown review in Hermes Desktop: annotate passages in a docked pane and send comment/question/change-request batches back to the agent, with automatic ::redline cards on delivered documents."
 author: silentpr0
 provides_hooks:

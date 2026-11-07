@@ -9,8 +9,10 @@ must never affect the response.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
+import sys
 from pathlib import Path, PurePosixPath
 
 _DIRECTIVE_RE = re.compile(r"::redline\{")
@@ -21,6 +23,41 @@ _CODE_EXT = (".py", ".sh", ".js", ".ts", ".tsx", ".c", ".h", ".cpp", ".go", ".rs
 _MIN_BYTES = 200
 
 _written: dict[str, str] = {}
+
+
+def _policy_module():
+    """The shared policy module, loaded once per process under a fixed name."""
+    policy_path = Path(__file__).resolve().parent / "dashboard" / "workspace_policy.py"
+    name = "redline_workspace_policy"
+    mod = sys.modules.get(name)
+    if mod is not None:
+        return mod
+    spec = importlib.util.spec_from_file_location(name, policy_path)
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _register_review_target(path: str, session_id: str = "") -> None:
+    """Authorize this exact file (never its parent directory) for this session."""
+    try:
+        mod = _policy_module()
+        if mod is not None:
+            mod.register_agent_path(path, session_id)
+    except Exception:
+        pass
+
+
+def _release_review_targets(session_id: str = "") -> None:
+    try:
+        mod = _policy_module()
+        if mod is not None:
+            mod.release_session(session_id)
+    except Exception:
+        pass
 
 
 def _skip_path(path: str | Path) -> bool:
@@ -62,7 +99,9 @@ def _post_tool_call(tool_name: str, args: dict, result, session_id: str = "", **
             return
         path = (args or {}).get("path") or ""
         if path and _eligible(path):
-            _written[session_id or "_"] = str(Path(path).expanduser().resolve())
+            resolved = str(Path(path).expanduser().resolve())
+            _written[session_id or "_"] = resolved
+            _register_review_target(resolved, session_id)
     except Exception:
         pass  # observers must never break a turn
 
@@ -85,6 +124,9 @@ def _transform_llm_output(response_text: str, session_id: str = "", **kwargs):
 def _on_session_end(session_id: str = "", **kwargs):
     try:
         _written.pop(session_id or "_", None)
+        # Grants are session-scoped: the backend must stop reading this file once
+        # the session that wrote it is gone, unless a configured root covers it.
+        _release_review_targets(session_id)
     except Exception:
         pass  # observers must never break a turn
 
