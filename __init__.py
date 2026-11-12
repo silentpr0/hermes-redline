@@ -20,13 +20,20 @@ _CODE_EXT = (".py", ".sh", ".js", ".ts", ".tsx", ".c", ".h", ".cpp", ".go", ".rs
 # ponytail: path heuristics instead of a config knob; add config_schema if users want opt-out granularity.
 _MIN_BYTES = 200
 
+# Two-part path segments that mark a file as working matter, never review matter.
+# `.hermes/cache` is the POSIX spelling of the Hermes cache; on Windows the same tree is
+# `AppData/Local/hermes/cache`, where the dot is gone and no segment pair matched, so
+# every one-shot script written to the scratch dir earned an automatic card.
+_SKIP_PAIRS = {(".hermes", "cache"), ("hermes", "cache"), ("cache", "scratch")}
+
 _written: dict[str, str] = {}
 
 
 def _skip_path(path: str | Path) -> bool:
     parts = tuple(part.lower() for part in PurePosixPath(str(path).replace("\\", "/")).parts)
     return (
-        any(parts[i:i + 2] == (".hermes", "cache") for i in range(len(parts) - 1))
+        any(parts[i:i + 2] in _SKIP_PAIRS for i in range(len(parts) - 1))
+        or "scratch" in parts
         or "skills" in parts
         or ".git" in parts
         or bool(parts and parts[-1].endswith(".redline.json"))
